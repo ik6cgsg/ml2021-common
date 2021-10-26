@@ -12,58 +12,61 @@ from typing import List
 
 
 TAG = '[common]'
+plt.interactive(False)
 
 
 def do_common_stuff():
     print(f'{TAG} do_common_stuff()')
 
 
+def show(img: np.ndarray, title: str, verbose: bool = False):
+    if verbose:
+        plt.figure()
+        plt.title(title)
+        plt.imshow(img, cmap="gray")
+        plt.show()
+
+
 def extract_background_mask(initial_image: np.ndarray, verbose: bool = False):
     image: np.ndarray = initial_image.copy()
 
-    def show(title: str):
-        if verbose:
-            plt.figure()
-            plt.title(title)
-            plt.imshow(image, cmap="gray")
-
-    show("input image")
+    show(image, "input image", verbose)
 
     # extract edges
     image = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY, 33, 2)
-    show("adaptive threshold")
+    show(image, "adaptive threshold", verbose)
 
     # remove noise
     image = skimage.morphology.binary_dilation(image, np.ones((3, 3)))
-    show("binary dilation to remove noise")
+    show(image, "binary dilation to remove noise", verbose)
 
     # close edges
     image = 1 - skimage.morphology.binary_closing(1 - image, np.ones((10, 10)))
-    show("binary closing of edges")
+    show(image, "binary closing of edges", verbose)
 
     # thicken edges
     image = 1 - skimage.morphology.binary_dilation(1 - image, np.ones((10, 10)))
-    show("binary erosion to thicken edges")
+    show(image, "binary erosion to thicken edges", verbose)
 
     # blur
     image = (skimage.filters.gaussian(image.astype("float"),
                                       sigma=15) * 255).astype("uint8")
-    show("gaussian")
+    show(image, "gaussian", verbose)
 
     # chan-vese
     image = skimage.segmentation.morphological_chan_vese(image, iterations=30)
-    show("morphological chan_vese")
+    show(image, "morphological chan_vese", verbose)
 
     # extract largest component
     labels = skimage.measure.label(image, 2)
     largestCC = labels == np.argmax(np.bincount(labels.flat))
     image = largestCC.astype("int")
-    show("largest connected component")
+    show(image, "largest connected component", verbose)
 
     # dilate background
     image = skimage.morphology.binary_dilation(image, np.ones((20, 20)))
-    show("binary dilation to compensate for gauss and chan-vese")
+    show(image, "binary dilation to compensate for gauss and chan-vese", verbose)
 
     return image
 
@@ -132,23 +135,83 @@ def extract_object_masks(image: np.ndarray) -> List[np.ndarray]:
             for mask in extract_object_mask_approximations(background_mask)]
 
 
+def get_perspective_matrix_and_scale(a4mask, verbose: bool = False):
+    def order_points(pts):
+        rect = np.zeros((4, 2), dtype="float32")
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        return rect
+
+    def four_point_transform(image, pts):
+        rect = order_points(pts)
+        (tl, tr, br, bl) = rect
+        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+        maxWidth = max(int(widthA), int(widthB))
+        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+        maxHeight = max(int(heightA), int(heightB))
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]], dtype="float32")
+        M = cv2.getPerspectiveTransform(rect, dst)
+        wk = 297.0 / max(maxWidth, maxHeight)
+        hk = 210.0 / min(maxWidth, maxHeight)
+        k = (hk + wk) / 2
+        warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+        show(warped, "transformed", verbose)
+        return M, k
+
+    contours, hierarchy = cv2.findContours(a4mask.astype("uint8"), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    perimeter = cv2.arcLength(contours[0], True)
+    approx = cv2.approxPolyDP(contours[0], 0.05 * perimeter, True)
+    # test
+    img = np.zeros(a4mask.shape, "uint8")
+    for point in approx:
+        x, y = point[0]
+        cv2.circle(img, (x, y), 6, (255, 255, 0), 4)
+    pts = np.array([approx[0][0], approx[1][0], approx[2][0], approx[3][0]], dtype="float32")
+    ordered = order_points(pts)
+    (tl, tr, br, bl) = ordered
+    cv2.line(img, (tl[0].astype("int"), tl[1].astype("int")), (br[0].astype("int"), br[1].astype("int")),
+             (255, 255, 0), thickness=3)
+    cv2.line(img, (tr[0].astype("int"), tr[1].astype("int")), (bl[0].astype("int"), bl[1].astype("int")),
+             (255, 255, 0), thickness=3)
+    show(img, "cross", verbose)
+    # end test
+    M, k = four_point_transform(img, pts)
+    print("Matrix = ", M)
+    print("mm in 1 pixel = ", k)
+    return M, k
+
+
 if __name__ == "__main__":
-    image_names = []
-    for infile in glob.glob("BaseJPG\\*.jpg"):
-        image_names.append(infile)
-
-    for name in image_names:
-        image = open_image(name)
-
-        background = extract_background_mask(image)
-        # color = label2rgb(skimage.measure.label(background), image, bg_label=0)
-        # save_image(color * 255, "output/" + name + "_background.jpg")
-        i = 0
-        for mask in extract_object_mask_approximations(background):
-            refined_mask = refine_object_mask(image, mask)
-            mask_color = label2rgb(skimage.measure.label(mask), image, bg_label=0)
-            save_image(mask_color * 255, "output/" + name + str(i) + "_mask.jpg")
-            refined_mask_color = label2rgb(skimage.measure.label(refined_mask),
-                                           image, bg_label=0)
-            save_image(refined_mask_color * 255, "output/" + name + str(i) + "_refined.jpg")
-            i += 1
+    image = open_image("a4.jpg")
+    background = extract_background_mask(image, False)
+    show(background, "mask", True)
+    m, k = get_perspective_matrix_and_scale(background, True)
+    # image_names = []
+    # for infile in glob.glob("BaseJPG\\*.jpg"):
+    #     image_names.append(infile)
+    #
+    # for name in image_names:
+    #     image = open_image(name)
+    #
+    #     background = extract_background_mask(image)
+    #     # color = label2rgb(skimage.measure.label(background), image, bg_label=0)
+    #     # save_image(color * 255, "output/" + name + "_background.jpg")
+    #     i = 0
+    #     for mask in extract_object_mask_approximations(background):
+    #         refined_mask = refine_object_mask(image, mask)
+    #         mask_color = label2rgb(skimage.measure.label(mask), image, bg_label=0)
+    #         save_image(mask_color * 255, "output/" + name + str(i) + "_mask.jpg")
+    #         refined_mask_color = label2rgb(skimage.measure.label(refined_mask),
+    #                                        image, bg_label=0)
+    #         save_image(refined_mask_color * 255, "output/" + name + str(i) + "_refined.jpg")
+    #         i += 1
