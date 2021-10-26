@@ -191,6 +191,12 @@ def get_perspective_matrix_and_scale(a4mask, verbose: bool = False):
     return M, k
 
 
+def open_image_rgb(filename: str):
+    img: Image = Image.open(filename)
+    img.thumbnail((960, 1280))
+    return np.array(img).reshape(img.size[1], img.size[0], 3)
+
+
 if __name__ == "__main__":
     image = open_image("a4.jpg")
     background = extract_background_mask(image, False)
